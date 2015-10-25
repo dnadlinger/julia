@@ -4719,7 +4719,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 topfile,                            // File
                 toplineno == -1 ? 0 : toplineno,  // Line
                 // Variable type
-                julia_type_to_di(varinfo.value.typ,ctx.dbuilder,specsig));
+                julia_type_to_di(varinfo.value.typ,ctx.dbuilder,varinfo.value.isboxed));
 #else
             varinfo.dinfo = ctx.dbuilder->createLocalVariable(
                 llvm::dwarf::DW_TAG_arg_variable,    // Tag
@@ -4727,7 +4727,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 argname->name,    // Variable name
                 topfile,                    // File
                 toplineno == -1 ? 0 : toplineno,             // Line (for now, use lineno of the function)
-                julia_type_to_di(varinfo.value.typ, ctx.dbuilder, specsig), // Variable type
+                julia_type_to_di(varinfo.value.typ, ctx.dbuilder,varinfo.value.isboxed), // Variable type
                 false,                  // May be optimized out
                 0,                      // Flags (TODO: Do we need any)
                 ctx.sret + i + 1);                   // Argument number (1-based)
@@ -4741,7 +4741,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 ctx.sret + nreq + 1,               // Argument number (1-based)
                 topfile,                    // File
                 toplineno == -1 ? 0 : toplineno,             // Line (for now, use lineno of the function)
-                julia_type_to_di(ctx.vars[ctx.vaName].value.typ, ctx.dbuilder, false));
+                julia_type_to_di(ctx.vars[ctx.vaName].value.typ, ctx.dbuilder, ctx.vars[ctx.vaName].value.isboxed));
 #else
             ctx.vars[ctx.vaName].dinfo = ctx.dbuilder->createLocalVariable(
                 llvm::dwarf::DW_TAG_arg_variable,   // Tag
@@ -4749,7 +4749,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 ctx.vaName->name,                   // Variable name
                 topfile,                             // File
                 toplineno == -1 ? 0 : toplineno,  // Line (for now, use lineno of the function)
-                julia_type_to_di(ctx.vars[ctx.vaName].value.typ, ctx.dbuilder, false),      // Variable type
+                julia_type_to_di(ctx.vars[ctx.vaName].value.typ, ctx.dbuilder, ctx.vars[ctx.vaName].value.isboxed),      // Variable type
                 false,                  // May be optimized out
                 0,                      // Flags (TODO: Do we need any)
                 ctx.sret + nreq + 1);              // Argument number (1-based)
@@ -4770,7 +4770,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 s->name,                // Variable name
                 topfile,                 // File
                 toplineno == -1 ? 0 : toplineno, // Line (for now, use lineno of the function)
-                julia_type_to_di(varinfo.value.typ, ctx.dbuilder, specsig), // Variable type
+                julia_type_to_di(varinfo.value.typ, ctx.dbuilder, varinfo.value.isboxed), // Variable type
                 false,                  // May be optimized out
                 0                       // Flags (TODO: Do we need any)
 #ifndef LLVM38
@@ -4794,7 +4794,7 @@ static Function *emit_function(jl_lambda_info_t *lam)
                 vname->name,            // Variable name
                 topfile,                 // File
                 toplineno == -1 ? 0 : toplineno, // Line (for now, use lineno of the function)
-                julia_type_to_di(varinfo.value.typ, ctx.dbuilder, specsig), // Variable type
+                julia_type_to_di(varinfo.value.typ, ctx.dbuilder, varinfo.value.isboxed), // Variable type
                 false,                  // May be optimized out
                 0                       // Flags (TODO: Do we need any)
 #ifndef LLVM38
@@ -6110,7 +6110,6 @@ static void init_julia_llvm_env(Module *m)
     FPM->add(createInstructionCombiningPass());  // Clean up after loop vectorizer
 #endif
     //FPM->add(createCFGSimplificationPass());     // Merge & remove BBs
-
     FPM->doInitialization();
 }
 

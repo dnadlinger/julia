@@ -30,7 +30,11 @@
 
 // target machine computation
 #include <llvm/CodeGen/TargetSubtargetInfo.h>
+#if JL_LLVM_VERSION >= 14000
+#include <llvm/MC/TargetRegistry.h>
+#else
 #include <llvm/Support/TargetRegistry.h>
+#endif
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Support/Host.h>
 #include <llvm/Support/TargetSelect.h>
@@ -870,7 +874,7 @@ extern "C" {
 template<typename T>
 static void add_return_attr(T *f, Attribute::AttrKind Kind)
 {
-    f->addAttribute(AttributeList::ReturnIndex, Kind);
+    f->addRetAttr(Kind);
 }
 
 static MDNode *best_tbaa(jl_value_t *jt) {
@@ -1822,7 +1826,7 @@ static void visitLine(jl_codectx_t &ctx, uint64_t *ptr, Value *addend, const cha
     Value *pv = ConstantExpr::getIntToPtr(
         ConstantInt::get(T_size, (uintptr_t)ptr),
         T_pint64);
-    Value *v = ctx.builder.CreateLoad(pv, true, name);
+    Value *v = ctx.builder.CreateLoad(T_int64, pv, true, name);
     v = ctx.builder.CreateAdd(v, addend);
     ctx.builder.CreateStore(v, pv, true); // volatile, not atomic, so this might be an underestimate,
                                           // but it's faster this way
@@ -2961,7 +2965,7 @@ static bool emit_builtin_call(jl_codectx_t &ctx, jl_cgval_t *ret, jl_value_t *f,
                         Value *idx = emit_unbox(ctx, T_size, fld, (jl_value_t*)jl_long_type);
                         idx = emit_bounds_check(ctx, va_ary, NULL, idx, valen, boundscheck);
                         idx = ctx.builder.CreateAdd(idx, ConstantInt::get(T_size, ctx.nReqArgs));
-                        Instruction *v = ctx.builder.CreateAlignedLoad(T_prjlvalue, ctx.builder.CreateInBoundsGEP(ctx.argArray, idx), Align(sizeof(void*)));
+                        Instruction *v = ctx.builder.CreateAlignedLoad(T_prjlvalue, ctx.builder.CreateInBoundsGEP(T_prjlvalue, ctx.argArray, idx), Align(sizeof(void*)));
                         // if we know the result type of this load, we will mark that information here too
                         tbaa_decorate(tbaa_value, maybe_mark_load_dereferenceable(v, false, rt));
                         *ret = mark_julia_type(ctx, v, /*boxed*/ true, rt);
@@ -4285,7 +4289,8 @@ static void emit_stmtpos(jl_codectx_t &ctx, jl_value_t *expr, int ssaval_result)
     else {
         if (!jl_is_method(ctx.linfo->def.method) && !ctx.is_opaque_closure) {
             // TODO: inference is invalid if this has any effect (which it often does)
-            LoadInst *world = ctx.builder.CreateAlignedLoad(prepare_global_in(jl_Module, jlgetworld_global), Align(sizeof(size_t)));
+            LoadInst *world = ctx.builder.CreateAlignedLoad(T_size,
+                prepare_global_in(jl_Module, jlgetworld_global), Align(sizeof(size_t)));
             world->setOrdering(AtomicOrdering::Acquire);
             ctx.builder.CreateAlignedStore(world, ctx.world_age_field, Align(sizeof(size_t)));
         }
@@ -4659,7 +4664,7 @@ static jl_cgval_t emit_expr(jl_codectx_t &ctx, jl_value_t *expr, ssize_t ssaval)
 
             jl_cgval_t world_age = mark_julia_type(ctx,
                 tbaa_decorate(tbaa_gcframe,
-                    ctx.builder.CreateAlignedLoad(ctx.world_age_field, Align(sizeof(size_t)))),
+                    ctx.builder.CreateAlignedLoad(T_size, ctx.world_age_field, Align(sizeof(size_t)))),
                     false,
                     jl_long_type);
 
@@ -4823,8 +4828,7 @@ static Value *get_current_signal_page(jl_codectx_t &ctx)
     // return ctx.builder.CreateCall(prepare_call(reuse_signal_page_func));
     auto ptls = get_current_ptls(ctx);
     int nthfield = offsetof(jl_tls_states_t, safepoint) / sizeof(void *);
-    return emit_nthptr_recast(ctx, ptls, nthfield, tbaa_const,
-                              PointerType::get(T_psize, 0));
+    return emit_nthptr_recast(ctx, ptls, nthfield, tbaa_const, T_psize);
 }
 
 static Function *emit_tojlinvoke(jl_code_instance_t *codeinst, Module *M, jl_codegen_params_t &params)
@@ -4927,7 +4931,7 @@ static void emit_cfunc_invalidate(
         }
         else {
             gf_ret = emit_bitcast(ctx, gf_ret, gfrt->getPointerTo());
-            ctx.builder.CreateRet(ctx.builder.CreateAlignedLoad(gf_ret, Align(julia_alignment(rettype))));
+            ctx.builder.CreateRet(ctx.builder.CreateAlignedLoad(gfrt, gf_ret, Align(julia_alignment(rettype))));
         }
         break;
     }
@@ -5033,38 +5037,38 @@ static Function* gen_cfun_wrapper(
         // we are adding the extra nest parameter after sret arg.
         std::vector<std::pair<unsigned, AttributeSet>> newAttributes;
         newAttributes.reserve(attributes.getNumAttrSets() + 1);
-        auto it = attributes.index_begin();
+        auto it = attributes.indexes().begin();
 
         // Skip past FunctionIndex
-        if (it == AttributeList::AttrIndex::FunctionIndex) {
+        if (*it == AttributeList::AttrIndex::FunctionIndex) {
             ++it;
         }
 
         // Move past ReturnValue and parameter return value
-        for (;it < AttributeList::AttrIndex::FirstArgIndex + sig.sret; ++it) {
-            if (attributes.hasAttributes(it)) {
-                newAttributes.emplace_back(it, attributes.getAttributes(it));
+        for (;*it < AttributeList::AttrIndex::FirstArgIndex + sig.sret; ++it) {
+            if (attributes.hasAttributesAtIndex(*it)) {
+                newAttributes.emplace_back(*it, attributes.getAttributes(*it));
             }
         }
 
         // Add the new nest attribute
         AttrBuilder attrBuilder;
         attrBuilder.addAttribute(Attribute::Nest);
-        newAttributes.emplace_back(it, AttributeSet::get(jl_LLVMContext, attrBuilder));
+        newAttributes.emplace_back(*it, AttributeSet::get(jl_LLVMContext, attrBuilder));
 
         // Shift forward the rest of the attributes
         if (attributes.getNumAttrSets() > 0) { // without this check the loop range below is invalid
-            for(;it < attributes.index_end(); ++it) {
-                if (attributes.hasAttributes(it)) {
-                    newAttributes.emplace_back(it + 1, attributes.getAttributes(it));
+            for(; it != attributes.indexes().end(); ++it) {
+                if (attributes.hasAttributesAtIndex(*it)) {
+                    newAttributes.emplace_back(*it + 1, attributes.getAttributes(*it));
                 }
             }
         }
 
         // Remember to add back FunctionIndex
-        if (attributes.hasAttributes(AttributeList::AttrIndex::FunctionIndex)) {
+        if (attributes.hasFnAttrs()) {
             newAttributes.emplace_back(AttributeList::AttrIndex::FunctionIndex,
-                                       attributes.getAttributes(AttributeList::AttrIndex::FunctionIndex));
+                                       attributes.getFnAttrs());
         }
 
         // Create the new AttributeList
@@ -5098,8 +5102,9 @@ static Function* gen_cfun_wrapper(
     // TODO: in the future, try to initialize a full TLS context here
     // for now, just use a dummy field to avoid a branch in this function
     ctx.world_age_field = ctx.builder.CreateSelect(have_tls, ctx.world_age_field, dummy_world);
-    Value *last_age = tbaa_decorate(tbaa_gcframe, ctx.builder.CreateAlignedLoad(ctx.world_age_field, Align(sizeof(size_t))));
-    Value *world_v = ctx.builder.CreateAlignedLoad(prepare_global_in(jl_Module, jlgetworld_global), Align(sizeof(size_t)));
+    Value *last_age = tbaa_decorate(tbaa_gcframe, ctx.builder.CreateAlignedLoad(T_size, ctx.world_age_field, Align(sizeof(size_t))));
+    Value *world_v = ctx.builder.CreateAlignedLoad(T_size,
+        prepare_global_in(jl_Module, jlgetworld_global), Align(sizeof(size_t)));
     cast<LoadInst>(world_v)->setOrdering(AtomicOrdering::Acquire);
 
     Value *age_ok = NULL;
@@ -5180,7 +5185,7 @@ static Function* gen_cfun_wrapper(
                 }
                 else {
                     val = emit_bitcast(ctx, val, T->getPointerTo());
-                    val = ctx.builder.CreateAlignedLoad(val, Align(1)); // make no alignment assumption about pointer from C
+                    val = ctx.builder.CreateAlignedLoad(T, val, Align(1)); // make no alignment assumption about pointer from C
                     inputarg = mark_julia_type(ctx, val, false, jargty);
                 }
             }
@@ -5241,7 +5246,7 @@ static Function* gen_cfun_wrapper(
                 assert(jl_is_datatype(jargty));
                 if (sig.byRefList.at(i)) {
                     assert(cast<PointerType>(val->getType())->getElementType() == sig.fargt[i]);
-                    val = ctx.builder.CreateAlignedLoad(val, Align(1)); // unknown alignment from C
+                    val = ctx.builder.CreateAlignedLoad(sig.fargt[i], val, Align(1)); // unknown alignment from C
                 }
                 else {
                     bool issigned = jl_signed_type && jl_subtype(jargty_proper, (jl_value_t*)jl_signed_type);
@@ -5795,7 +5800,7 @@ static Function *gen_invoke_wrapper(jl_method_instance_t *lam, jl_value_t *jlret
         if (!isboxed) {
             theArg = decay_derived(ctx, emit_bitcast(ctx, theArg, PointerType::get(lty, 0)));
             if (!lty->isAggregateType()) // keep "aggregate" type values in place as pointers
-                theArg = ctx.builder.CreateAlignedLoad(theArg, Align(julia_alignment(ty)));
+                theArg = ctx.builder.CreateAlignedLoad(lty, theArg, Align(julia_alignment(ty)));
         }
         assert(dyn_cast<UndefValue>(theArg) == NULL);
         args[idx] = theArg;
@@ -5905,22 +5910,22 @@ static jl_returninfo_t get_specsig_function(jl_codectx_t &ctx, Module *M, String
         (void)srt; // silence unused variable error
 #else
         Attribute sret = Attribute::getWithStructRetType(jl_LLVMContext, srt);
-        attributes = attributes.addAttribute(jl_LLVMContext, argno, sret);
+        attributes = attributes.addAttributeAtIndex(jl_LLVMContext, argno, sret);
 #endif
-        attributes = attributes.addAttribute(jl_LLVMContext, argno, Attribute::NoAlias);
-        attributes = attributes.addAttribute(jl_LLVMContext, argno, Attribute::NoCapture);
+        attributes = attributes.addAttributeAtIndex(jl_LLVMContext, argno, Attribute::NoAlias);
+        attributes = attributes.addAttributeAtIndex(jl_LLVMContext, argno, Attribute::NoCapture);
     }
     if (props.cc == jl_returninfo_t::Union) {
         unsigned argno = 1;
-        attributes = attributes.addAttribute(jl_LLVMContext, argno, Attribute::NoAlias);
-        attributes = attributes.addAttribute(jl_LLVMContext, argno, Attribute::NoCapture);
+        attributes = attributes.addAttributeAtIndex(jl_LLVMContext, argno, Attribute::NoAlias);
+        attributes = attributes.addAttributeAtIndex(jl_LLVMContext, argno, Attribute::NoCapture);
     }
 
     if (props.return_roots) {
         fsig.push_back(ArrayType::get(T_prjlvalue, props.return_roots)->getPointerTo(0));
         unsigned argno = fsig.size();
-        attributes = attributes.addAttribute(jl_LLVMContext, argno, Attribute::NoAlias);
-        attributes = attributes.addAttribute(jl_LLVMContext, argno, Attribute::NoCapture);
+        attributes = attributes.addAttributeAtIndex(jl_LLVMContext, argno, Attribute::NoAlias);
+        attributes = attributes.addAttributeAtIndex(jl_LLVMContext, argno, Attribute::NoCapture);
     }
 
     for (size_t i = 0; i < jl_nparams(sig); i++) {
@@ -6233,8 +6238,8 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
     }
 
     if (returninfo.cc == jl_returninfo_t::Union) {
-        f->addAttribute(1, Attribute::getWithDereferenceableBytes(jl_LLVMContext, returninfo.union_bytes));
-        f->addAttribute(1, Attribute::getWithAlignment(jl_LLVMContext, Align(returninfo.union_align)));
+        f->addAttributeAtIndex(1, Attribute::getWithDereferenceableBytes(jl_LLVMContext, returninfo.union_bytes));
+        f->addAttributeAtIndex(1, Attribute::getWithAlignment(jl_LLVMContext, Align(returninfo.union_align)));
     }
 
 #ifdef JL_DEBUG_BUILD
@@ -6388,7 +6393,8 @@ static std::pair<std::unique_ptr<Module>, jl_llvm_functions_t>
     Value *last_age = NULL;
     emit_last_age_field(ctx);
     if (toplevel || ctx.is_opaque_closure) {
-        last_age = tbaa_decorate(tbaa_gcframe, ctx.builder.CreateAlignedLoad(ctx.world_age_field, Align(sizeof(size_t))));
+        last_age = tbaa_decorate(tbaa_gcframe, ctx.builder.CreateAlignedLoad(
+            T_size, ctx.world_age_field, Align(sizeof(size_t))));
     }
 
     // step 7. allocate local variables slots

@@ -133,13 +133,14 @@ static inline llvm::Value *get_current_ptls_from_task(llvm::IRBuilder<> &builder
 {
     using namespace llvm;
     auto T_ppjlvalue = JuliaType::get_ppjlvalue_ty(builder.getContext());
+    auto T_pjlvalue = JuliaType::get_pjlvalue_ty(builder.getContext());
     auto T_size = builder.GetInsertBlock()->getModule()->getDataLayout().getIntPtrType(builder.getContext());
     const int ptls_offset = offsetof(jl_task_t, ptls);
     llvm::Value *pptls = builder.CreateInBoundsGEP(
-        JuliaType::get_pjlvalue_ty(builder.getContext()), current_task,
+        T_pjlvalue, current_task,
         ConstantInt::get(T_size, ptls_offset / sizeof(void *)),
         "ptls_field");
-    LoadInst *ptls_load = builder.CreateAlignedLoad(
+    LoadInst *ptls_load = builder.CreateAlignedLoad(T_pjlvalue,
         emit_bitcast_with_builder(builder, pptls, T_ppjlvalue), Align(sizeof(void *)), "ptls_load");
     // Note: Corresponding store (`t->ptls = ptls`) happens in `ctx_switch` of tasks.c.
     tbaa_decorate(tbaa, ptls_load);

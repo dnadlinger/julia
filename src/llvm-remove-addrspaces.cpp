@@ -394,8 +394,8 @@ bool RemoveAddrspacesPass::runOnModule(Module &M)
         for (unsigned i = 0; i < Attrs.getNumAttrSets(); ++i) {
             for (Attribute::AttrKind TypedAttr :
                  {Attribute::ByVal, Attribute::StructRet, Attribute::ByRef}) {
-                if (Type *Ty = Attrs.getAttribute(i, TypedAttr).getValueAsType()) {
-                    Attrs = Attrs.replaceAttributeType(C, i, TypedAttr,
+                if (Type *Ty = Attrs.getAttributeAtIndex(i, TypedAttr).getValueAsType()) {
+                    Attrs = Attrs.replaceAttributeTypeAtIndex(C, i, TypedAttr,
                                                        TypeRemapper.remapType(Ty));
                     break;
                 }
